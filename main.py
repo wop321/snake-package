@@ -119,4 +119,4 @@ async def delete(interaction: discord.Interaction, name: str, password: str):
 
 keep_alive()
 client.run(
-    'MTQ0MTQzNTg4OTE3NDU4MTQ2OQ.G_hWv-.8yORDTuV3ycQJ14vHAyE-ASHF7ZHf-6fDS1vCY')
+    'MTQ0MTQzNTg4OTE3NDU4MTQ2OQ.GgKX0a.RsgG6k7wHUGEl0drScPXKSiL1748gc7RAONPXM')
