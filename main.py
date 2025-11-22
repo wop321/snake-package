@@ -1,12 +1,11 @@
 import discord
 from discord import app_commands
 import os
-import re # <-- New Import for regular expressions
+import re
 from keep_alive import keep_alive
 # --- CONFIGURATION ---
 DATABASE_FILE = "database.txt"
-ADMIN_PASSWORD = "abcd980"  # The password required to delete items
-# Regex pattern for basic URL validation (checks for http/https followed by domain)
+ADMIN_PASSWORD = "abcd980"
 URL_REGEX = r"https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+"
 
 
