@@ -1,86 +1,138 @@
-import discord
 import os
-import io
-from discord import app_commands
+import discord
+from discord.ext import commands
 from dotenv import load_dotenv
-from keep_alive import keep_alive # Imports the Flask server logic
+from keep_alive import keep_alive # Import the uptime handler
 
-# --- CONFIGURATION & ENV LOADING ---
+# --- Configuration ---
 load_dotenv()
-TOKEN = os.getenv('DISCORD_TOKEN')
+# Load token securely from a .env file
+TOKEN = os.getenv('DISCORD_TOKEN') 
+DATABASE_FILE = 'database.txt'
+DELETE_PASSWORD = "abcd980"
 
-DATABASE_FILE = "database.txt" # The local file storage
+# --- Bot Setup ---
+# We need the message_content intent to read user commands
+intents = discord.Intents.default()
+intents.message_content = True
+intents.guilds = True
 
-class MyClient(discord.Client):
-    def __init__(self):
-        super().__init__(intents=discord.Intents.default())
-        self.tree = app_commands.CommandTree(self)
+# Initialize the bot client
+bot = commands.Bot(command_prefix='/', intents=intents)
 
-    async def on_ready(self):
-        await self.tree.sync()
-        print(f'Logged in as {self.user} (ID: {self.user.id})')
-        print('------ Ready to accept commands! ------')
+# --- Utility Functions for File Management ---
 
-client = MyClient()
+def load_data():
+    """Loads all non-empty lines from the database file."""
+    if not os.path.exists(DATABASE_FILE):
+        return []
+    with open(DATABASE_FILE, 'r', encoding='utf-8') as f:
+        # Filter out empty lines and strip whitespace
+        return [line.strip() for line in f if line.strip()]
 
-# ------------------------------
-# --- COMMAND: /add [name] [url] ---
-# ------------------------------
-@client.tree.command(name="add", description="Add a module name and URL to the database")
-@app_commands.describe(name="The name of the module", url="The link to the module")
-async def add(interaction: discord.Interaction, name: str, url: str):
-    is_duplicate = False
+def save_data(data):
+    """Saves the current list of data lines to the file."""
+    with open(DATABASE_FILE, 'w', encoding='utf-8') as f:
+        for entry in data:
+            f.write(entry + '\n')
 
-    # Check for duplicates by reading the file
-    if os.path.exists(DATABASE_FILE):
-        with open(DATABASE_FILE, "r") as f:
-            for line in f:
-                parts = line.split(' - ')
-                # Check if the name (first part) matches
-                if parts and parts[0].strip() == name:
-                    is_duplicate = True
-                    break
+# --- Events ---
 
-    if is_duplicate:
-        await interaction.response.send_message("module already added", ephemeral=True)
-    else:
-        # Write the new entry in the requested format: name - url
-        with open(DATABASE_FILE, "a") as f:
-            f.write(f"{name} - {url}\n")
-        await interaction.response.send_message("module upload successful")
+@bot.event
+async def on_ready():
+    """Confirms the bot is logged in and ready."""
+    print(f'Bot logged in as {bot.user}')
+    print('-------------------------------------------')
 
-# ------------------------------
-# --- COMMAND: /list ---
-# ------------------------------
-@client.tree.command(name="list", description="Show all modules in the database")
-async def list_modules(interaction: discord.Interaction):
-    if not os.path.exists(DATABASE_FILE) or os.path.getsize(DATABASE_FILE) == 0:
-        await interaction.response.send_message("The database is currently empty.", ephemeral=True)
-        return
+# --- Commands ---
 
-    with open(DATABASE_FILE, "r") as f:
-        content = f.read()
+@bot.command(name='add')
+async def add_entry(ctx, name: str, url: str):
+    """/add [name] [url]: Adds a new unique entry to the database.txt."""
+    
+    entries = load_data()
+    
+    # Check for duplicates based on name (assuming format is always "name - url")
+    new_entry_name_prefix = f"{name} - "
+    if any(entry.startswith(new_entry_name_prefix) for entry in entries):
+        return await ctx.send(f"Error: Entry with name **{name}** already exists.")
 
-    # Handle Discord's 2000 character limit
-    if len(content) > 1950:
-        # Send as a file if the list is too long
-        f_io = io.BytesIO(content.encode())
-        await interaction.response.send_message(
-            "The list is too long to display! Here is the file:", 
-            file=discord.File(f_io, filename="database.txt")
+    new_entry = f"{name} - {url}"
+    entries.append(new_entry)
+    save_data(entries)
+    
+    await ctx.send("✅ Module upload successful.")
+
+@bot.command(name='list')
+async def list_entries(ctx):
+    """/list: Reads all entries from database.txt and sends them to the user."""
+    
+    entries = load_data()
+    
+    if not entries:
+        return await ctx.send("The database is currently empty.")
+
+    # 1. Format the list string
+    formatted_list = "Module Database Entries:\n"
+    for i, full_entry in enumerate(entries, 1):
+        formatted_list += f"{i}. {full_entry}\n"
+    
+    # 2. Handle Discord's character limit (1950 characters as a safe buffer)
+    if len(formatted_list) > 1950:
+        # Send as a file if it exceeds the limit
+        file_path = "module_list.txt"
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(formatted_list)
+        
+        await ctx.send(
+            "📚 The module list is too long for a message. Sending as a file:",
+            file=discord.File(file_path)
         )
+        os.remove(file_path) # Clean up the temporary file
     else:
-        # Send as a message
-        await interaction.response.send_message(f"**Current Modules:**\n{content}")
+        # Send directly as a message
+        await ctx.send(f"```\n{formatted_list}\n```")
 
 
-# ------------------------------
-# --- RUN THE BOT ---
-# ------------------------------
+@bot.command(name='delete')
+async def delete_entry(ctx, name: str, password: str):
+    """/delete [name] [password]: Requires a password check and deletes the entry."""
 
-if TOKEN:
-    # START THE FLASK SERVER for 24/7 uptime
+    # 1. Password check
+    if password != DELETE_PASSWORD:
+        return await ctx.send("❌ Incorrect password. Deletion failed.")
+
+    entries = load_data()
+    
+    # Find the full entry string to delete
+    entry_to_delete = None
+    prefix = f"{name} - "
+    
+    for entry in entries:
+        if entry.startswith(prefix):
+            entry_to_delete = entry
+            break
+            
+    if entry_to_delete:
+        entries.remove(entry_to_delete)
+        save_data(entries)
+        await ctx.send(f"🗑️ Successfully deleted entry: **{name}**.")
+    else:
+        await ctx.send(f"Error: Entry with name **{name}** not found.")
+
+# --- Startup ---
+
+if __name__ == '__main__':
+    # Start the Flask web server in a separate thread for uptime monitoring
     keep_alive() 
-    client.run(TOKEN)
-else:
-    print("FATAL ERROR: DISCORD_TOKEN not found. Please check your .env file.")
+    
+    if TOKEN:
+        # Ensure database.txt exists when starting the bot
+        if not os.path.exists(DATABASE_FILE):
+             print(f"Creating empty {DATABASE_FILE}")
+             with open(DATABASE_FILE, 'w', encoding='utf-8') as f:
+                 pass
+                 
+        bot.run(TOKEN)
+    else:
+        print("Error: DISCORD_TOKEN not found. Please create a .env file and set the token.")
