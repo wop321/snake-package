@@ -1,12 +1,12 @@
 import threading
 from flask import Flask
-
+f = open("database.txt")
 app = Flask(__name__)
 
 @app.route('/')
 def home():
     """A simple route to keep the service alive."""
-    return "Bot is awake and running!"
+    return f.read()
 
 def run():
     """Starts the Flask server."""
