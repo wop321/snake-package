@@ -1,15 +1,23 @@
+import threading
 from flask import Flask
-from threading import Thread
 
-app = Flask('')
+app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot is running!"
+    """A simple route to keep the service alive."""
+    return "Bot is awake and running!"
 
 def run():
+    """Starts the Flask server."""
+    # Run on 0.0.0.0 and 8080 for broad compatibility
     app.run(host='0.0.0.0', port=8080)
 
 def keep_alive():
-    t = Thread(target=run)
+    """Initializes and starts the Flask server in a separate thread."""
+    t = threading.Thread(target=run)
     t.start()
+    print("Keep-alive server started on port 8080.")
+
+if __name__ == '__main__':
+    keep_alive()
