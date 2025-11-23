@@ -1,112 +1,241 @@
-import os 
-from flask import Flask, redirect, abort, Response
+import discord
+from discord import app_commands
+import os
+import re
+import aiohttp 
+import json 
 import asyncio 
 
-# Global variable to hold the reference to the Discord bot's live module database.
-global_module_database = {}
+# --- NEW: Optional Local Environment Loading ---
+try:
+    from dotenv import load_dotenv
+    # Load variables from local .env file (if running locally)
+    load_dotenv()
+    print("Environment variables loaded from .env file (if present).")
+except ImportError:
+    # This is fine if running on a cloud host like Render/Replit
+    print("Dotenv not found. Relying on host environment variables.")
+    pass
+# ---------------------------------------------
 
-app = Flask(__name__)
+# Core Firebase Admin SDK imports
+import firebase_admin
+from firebase_admin import credentials
+from firebase_admin import firestore
+from keep_alive import keep_alive 
 
-@app.route('/')
-def home():
-    """
-    The main route. It generates an HTML page listing all available shortcuts
-    from the in-memory database dictionary (synced from Firestore).
-    This serves as the public, viewable database.
-    """
-    names = sorted(global_module_database.keys())
+# --- CONFIGURATION ---
+ADMIN_PASSWORD = "abcd980"
+URL_REGEX = r"https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+" 
+
+# --- FIREBASE SETUP ---
+try:
+    if not firebase_admin._apps:
+        # Check if the credentials variable exists
+        creds_json = os.environ.get('FIREBASE_CREDENTIALS')
+        
+        if creds_json:
+            # Use credentials from the environment variable (better for deployment)
+            print("Database: Attempting initialization using FIREBASE_CREDENTIALS...")
+            cred_dict = json.loads(creds_json)
+            cred = credentials.Certificate(cred_dict)
+            firebase_admin.initialize_app(cred)
+        else:
+            # Fallback to default (relies on host service account)
+            print("Database: FIREBASE_CREDENTIALS not found. Attempting default initialization.")
+            firebase_admin.initialize_app()
+            
+    db = firestore.client()
+    print("Firestore initialized successfully.")
+except Exception as e:
+    # IMPORTANT: The Discord token is needed later, but Firebase failure is logged here.
+    print(f"FATAL ERROR: Firebase initialization failed. Persistence will not work. Error: {e}")
+    db = None
+
+COLLECTION_NAME = 'discord_git_projects'
+
+# Initialize the in-memory dictionary. This holds the live data, synced with Firestore.
+module_database = {} 
+
+# --- HELPER FUNCTION: GITHUB VALIDATION ---
+
+async def check_github_repo_valid(github_path: str) -> bool:
+    """Checks if the given GitHub path corresponds to a live repository using an HTTP HEAD request."""
+    # Construct the full URL for the repository's main page
+    repo_url = f"https://github.com/{github_path}"
     
-    if not names:
-        return Response(
-            """
-            <!DOCTYPE html>
-            <html><head><title>Project Redirect Server</title></head>
-            <body><h1>No Projects Found</h1><p>The server is running, but the database is empty. Add projects using the Discord bot's /add command!</p></body>
-            </html>
-            """,
-            mimetype='text/html'
-        )
+    # Use aiohttp to make an asynchronous request
+    async with aiohttp.ClientSession() as session:
+        try:
+            # Use HEAD request for efficiency (only checks headers, doesn't download content)
+            # GitHub returns 200 for a valid repo and 404 for an invalid one.
+            async with session.head(repo_url, allow_redirects=True, timeout=5) as response:
+                # 200 means the page exists (is valid)
+                return response.status == 200
+        except aiohttp.ClientError as e:
+            # Catch network/connection issues
+            print(f"Aiohttp error during GitHub check for {github_path}: {e}")
+            return False
+        except Exception as e:
+            # Catch other unexpected errors
+            print(f"Unexpected error during GitHub check: {e}")
+            return False
 
-    # Generate an HTML list of all available shortcuts
-    html_list = "<ul>" + "".join([
-        f'<li><a href="/{name}" class="font-mono bg-blue-100 text-blue-800 p-2 rounded-lg hover:bg-blue-200">{name}</a></li>' 
-        for name in names
-    ]) + "</ul>"
+# --- FIREBASE HANDLER FUNCTIONS (Persistence) ---
+
+def load_database():
+    """Loads all projects (Git install commands) from Firestore into the in-memory dictionary."""
+    global module_database
+    module_database = {} # Clear existing data
     
-    # Use Tailwind CSS classes for a simple, mobile-friendly design
-    return Response(
-        f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Project Redirect Server</title>
-            <script src="https://cdn.tailwindcss.com"></script>
-            <style>
-                body {{ font-family: 'Inter', sans-serif; }}
-            </style>
-        </head>
-        <body class="bg-gray-50 min-h-screen flex flex-col items-center p-4">
-            <div class="max-w-xl w-full bg-white shadow-xl rounded-2xl p-6 md:p-10 mt-10">
-                <h1 class="text-3xl font-extrabold text-gray-900 mb-2">Project Shortcut Database</h1>
-                <p class="text-gray-600 mb-6">
-                    This is a live, persistent list of all projects saved via the Discord bot. 
-                    Click a shortcut name to get the direct <code>pip install</code> command.
-                </p>
-                
-                <h2 class="text-xl font-semibold text-gray-800 mb-4 border-b pb-2">Available Shortcuts ({len(names)})</h2>
-                
-                <div class="space-y-3">
-                    {html_list}
-                </div>
-
-                <div class="mt-8 pt-4 border-t text-sm text-gray-500">
-                    <p>To use, type the following into your terminal, replacing [site.com] with this server's URL:</p>
-                    <p class="font-mono bg-gray-100 p-2 rounded-lg mt-2 text-gray-700">
-                        pip install <a href="#" class="underline">https://[site.com]/[shortcut-name]</a>
-                    </p>
-                </div>
-            </div>
-        </body>
-        </html>
-        """,
-        mimetype='text/html'
-    )
-
-@app.route('/<name>')
-def redirect_to_url(name):
-    """
-    Looks up the 'name' (shortcut) in the database and redirects the user
-    to the associated Git install command URL.
-    """
-    url = global_module_database.get(name)
-    
-    if url:
-        return redirect(url, code=302)
+    if db:
+        try:
+            modules_ref = db.collection(COLLECTION_NAME).stream()
+            for doc in modules_ref:
+                data = doc.to_dict()
+                if 'url' in data: # 'url' field now stores the full install command string
+                    # Document ID is the module name (e.g., 'my_lib')
+                    module_database[doc.id] = data['url']
+            print(f"Database loaded successfully from Firestore. {len(module_database)} projects found.")
+        except Exception as e:
+            print(f"Error loading data from Firestore: {e}")
     else:
-        return abort(404, description=f"Module '{name}' not found in the persistent database.")
+        print("Firestore client unavailable. Running with an empty, non-persistent database.")
 
 
-def run_flask_server():
-    """Blocking function to start the Flask server."""
-    # Use 0.0.0.0 and the PORT environment variable expected by hosting services
-    print("Attempting to start Flask server on 0.0.0.0...")
-    # By setting threaded=True, we rely on Flask's internal threading, 
-    # but still offload the main blocking call via the executor.
-    app.run(host='0.0.0.0', port=os.environ.get('PORT', 8080), debug=False, threaded=True)
+def add_module_to_firestore(name, command):
+    """Adds or updates a project (install command) in Firestore."""
+    if not db: return False
+    try:
+        # Store the full command string under the 'url' field
+        db.collection(COLLECTION_NAME).document(name).set({'url': command})
+        return True
+    except Exception as e:
+        print(f"Error adding module to Firestore: {e}")
+        return False
+
+def delete_module_from_firestore(name):
+    """Deletes a project from Firestore."""
+    if not db: return False
+    try:
+        db.collection(COLLECTION_NAME).document(name).delete()
+        return True
+    except Exception as e:
+        print(f"Error deleting module from Firestore: {e}")
+        return False
 
 
-async def keep_alive(client, db_reference):
-    """
-    Schedules the blocking Flask server function to run on a separate thread 
-    provided by the Discord bot's event loop executor.
-    
-    This function is called by client.setup_hook and receives the client object 
-    (Arg 1) and the database reference (Arg 2).
-    """
-    global global_module_database
-    global_module_database = db_reference
-    
-    # Run the blocking Flask server in the event loop's executor
-    await client.loop.run_in_executor(None, run_flask_server)
-    
-    print("Keep-alive server confirmed running via asyncio executor.")
+# --- Discord Bot Setup ---
+
+class MyClient(discord.Client):
+
+    def __init__(self):
+        super().__init__(intents=discord.Intents.default())
+        self.tree = app_commands.CommandTree(self)
+
+    async def setup_hook(self) -> None:
+        """Called immediately after the client is initialised but before connecting to Discord."""
+        # Schedule the web server to run concurrently in the background.
+        # This is the correct way to start non-blocking background tasks in discord.py.
+        self.loop.create_task(keep_alive(self, module_database))
+        print("Keep-alive task scheduled via setup_hook.")
+
+    async def on_ready(self):
+        # Load data from the persistent source (Firestore)
+        load_database()
+        
+        # Sync commands
+        await self.tree.sync()
+        print(f'Logged in as {self.user} (ID: {self.user.id})')
+
+
+# --- DEFINE CLIENT (MUST BE BEFORE COMMANDS ARE REGISTERED) ---
+client = MyClient()
+
+
+# --- COMMAND: /add ---
+@client.tree.command(name="add", description="Add a GitHub project for easy 'pip install git+' linking")
+@app_commands.describe(name="Shortcut Name (e.g., my_project)", github_path="GitHub username/repo (e.g., user/awesome-project)")
+async def add(interaction: discord.Interaction, name: str, github_path: str):
+    # 1. Validate the GitHub path format (must contain exactly one '/')
+    if not re.match(r'^[^/]+/[^/]+$', github_path):
+        await interaction.response.send_message("Invalid GitHub path format. Please use 'username/repo-name'.", ephemeral=True)
+        return
+
+    # 2. Check if the GitHub repository actually exists (HTTP HEAD request)
+    await interaction.response.defer(ephemeral=True, thinking=True) # Acknowledge interaction while checking
+    if not await check_github_repo_valid(github_path):
+        await interaction.followup.send("❌ Error: That GitHub repository does not appear to be valid or accessible. Please check the path.", ephemeral=True)
+        return
+
+    # 3. Construct the full Git install command
+    install_command = f"pip install git+https://github.com/{github_path}.git"
+
+    if name in module_database:
+        await interaction.followup.send("module already added", ephemeral=True)
+    else:
+        # 4. Save the full command string to Firestore
+        if add_module_to_firestore(name, install_command):
+            # Update in-memory dictionary
+            module_database[name] = install_command
+            await interaction.followup.send(
+                f"Project added successfully and verified.\n"
+                f"Shortcut: **{name}**\n"
+                f"Command: `{install_command}`"
+            )
+        else:
+             await interaction.followup.send("Failed to add project due to database error. Is Firestore configured?", ephemeral=True)
+
+
+# --- COMMAND: /list ---
+@client.tree.command(name="list", description="Show all saved project install commands")
+async def list_modules(interaction: discord.Interaction):
+    if not module_database:
+        await interaction.response.send_message("The database is empty.", ephemeral=True)
+        return
+
+    module_list = []
+    for name, command in sorted(module_database.items()):
+        # Displays the shortcut name and the full install command
+        module_list.append(f"**{name}**: `{command}`")
+
+    content = "\n".join(module_list)
+
+    if len(content) > 1950:
+        await interaction.response.send_message(
+            "List is too long! Sending as text file.",
+            file=discord.File(fp=discord.io.BytesIO(content.encode("utf-8")), filename="projects_list.txt"))
+    else:
+        await interaction.response.send_message(f"**Current Projects (Install Commands):**\n{content}")
+
+
+# --- COMMAND: /delete ---
+@client.tree.command(name="delete", description="Delete a project (Password Required)")
+@app_commands.describe(name="Project Name to delete", password="Admin Password")
+async def delete(interaction: discord.Interaction, name: str, password: str):
+    if password != ADMIN_PASSWORD:
+        await interaction.response.send_message("❌ Incorrect password.", ephemeral=True)
+        return
+
+    if name in module_database:
+        # Delete from Firestore
+        if delete_module_from_firestore(name):
+            # Delete from in-memory dictionary
+            del module_database[name]
+            await interaction.response.send_message(f"✅ Successfully deleted: **{name}** (Persistent)")
+        else:
+             await interaction.response.send_message("Failed to delete project due to database error.", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"⚠️ Project **{name}** not found.", ephemeral=True)
+
+
+# --- START BOT ---
+
+DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN')
+
+if DISCORD_TOKEN is None:
+    print("FATAL ERROR: DISCORD_TOKEN environment variable not set.")
+    exit()
+
+# The web server startup is now handled inside MyClient.setup_hook()
+client.run(DISCORD_TOKEN)
