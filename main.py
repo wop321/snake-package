@@ -2,62 +2,79 @@ import discord
 from discord import app_commands
 import os
 import re
-import sqlite3 # New import for persistent database handling
-from keep_alive import keep_alive # Imports the server function
+# Core Firebase Admin SDK imports
+import firebase_admin
+from firebase_admin import credentials
+from firebase_admin import firestore
+from keep_alive import keep_alive 
 
 # --- CONFIGURATION ---
 ADMIN_PASSWORD = "abcd980"
 URL_REGEX = r"https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+"
-DATABASE_FILE_SQLITE = "modules.db" # Database file for persistent storage
 
-# Initialize the in-memory dictionary. This holds the live data, synced with SQLite.
+# --- FIREBASE SETUP ---
+# WARNING: For production, you must configure authentication (e.g., using a 
+# Service Account Key JSON file) for this to work outside of environments 
+# with default credentials.
+try:
+    # Attempt to initialize using application default credentials (easiest way in cloud)
+    # If this fails, you need to manually load your service account JSON key.
+    if not firebase_admin._apps:
+        firebase_admin.initialize_app()
+    db = firestore.client()
+    print("Firestore initialized successfully.")
+except Exception as e:
+    print(f"FATAL ERROR: Firebase initialization failed. Persistence will not work. Error: {e}")
+    db = None
+
+COLLECTION_NAME = 'discord_modules'
+
+# Initialize the in-memory dictionary. This holds the live data, synced with Firestore.
 module_database = {} 
 
-# --- SQLITE HANDLER FUNCTIONS (Persistence) ---
+# --- FIREBASE HANDLER FUNCTIONS (Persistence) ---
 
-def initialize_db():
-    """Initializes the SQLite database and creates the table if it doesn't exist."""
-    conn = sqlite3.connect(DATABASE_FILE_SQLITE)
-    cursor = conn.cursor()
-    # Create the modules table if it doesn't exist
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS modules (
-            name TEXT PRIMARY KEY,
-            url TEXT NOT NULL
-        )
-    """)
-    conn.commit()
-    conn.close()
-    
 def load_database():
-    """Loads all modules from the SQLite database into the in-memory dictionary."""
+    """Loads all modules from Firestore into the in-memory dictionary."""
     global module_database
     module_database = {} # Clear existing data
     
-    conn = sqlite3.connect(DATABASE_FILE_SQLITE)
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT name, url FROM modules")
-    
-    for name, url in cursor.fetchall():
-        module_database[name] = url
-        
-    conn.close()
-    print(f"Database loaded successfully. {len(module_database)} modules found.")
+    if db:
+        try:
+            modules_ref = db.collection(COLLECTION_NAME).stream()
+            for doc in modules_ref:
+                data = doc.to_dict()
+                if 'url' in data:
+                    # Document ID is the module name (e.g., 'python')
+                    module_database[doc.id] = data['url']
+            print(f"Database loaded successfully from Firestore. {len(module_database)} modules found.")
+        except Exception as e:
+            print(f"Error loading data from Firestore: {e}")
+    else:
+        print("Firestore client unavailable. Running with an empty, non-persistent database.")
 
-def execute_db_change(query, params=()):
-    """Executes an INSERT, UPDATE, or DELETE query and returns success status."""
-    conn = sqlite3.connect(DATABASE_FILE_SQLITE)
-    cursor = conn.cursor()
+
+def add_module_to_firestore(name, url):
+    """Adds or updates a module in Firestore."""
+    if not db: return False
     try:
-        cursor.execute(query, params)
-        conn.commit()
+        # Use the module name as the document ID for easy lookup
+        db.collection(COLLECTION_NAME).document(name).set({'url': url})
         return True
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
+    except Exception as e:
+        print(f"Error adding module to Firestore: {e}")
         return False
-    finally:
-        conn.close()
+
+def delete_module_from_firestore(name):
+    """Deletes a module from Firestore."""
+    if not db: return False
+    try:
+        db.collection(COLLECTION_NAME).document(name).delete()
+        return True
+    except Exception as e:
+        print(f"Error deleting module from Firestore: {e}")
+        return False
+
 
 # --- Discord Bot Setup ---
 
@@ -68,11 +85,10 @@ class MyClient(discord.Client):
         self.tree = app_commands.CommandTree(self)
 
     async def on_ready(self):
-        # 1. Initialize DB structure and load data
-        initialize_db()
+        # Load data from the persistent source (Firestore)
         load_database()
         
-        # 2. Sync commands
+        # Sync commands
         await self.tree.sync()
         print(f'Logged in as {self.user} (ID: {self.user.id})')
 
@@ -81,29 +97,27 @@ client = MyClient()
 
 
 # --- COMMAND: /add ---
-@client.tree.command(name="add", description="Add a module to the database")
+@client.tree.command(name="add", description="Add a module to the persistent database")
 @app_commands.describe(name="Module Name", url="Module Link")
 async def add(interaction: discord.Interaction, name: str, url: str):
     if not re.match(URL_REGEX, url):
         await interaction.response.send_message("not an url, skill issue buddy", ephemeral=True)
         return
 
-    # Check for duplicates in memory (faster check)
     if name in module_database:
         await interaction.response.send_message("module already added", ephemeral=True)
     else:
-        # Add to SQLite
-        query = "INSERT INTO modules (name, url) VALUES (?, ?)"
-        if execute_db_change(query, (name, url)):
-            # Update in-memory dictionary only on success
+        # Save to Firestore
+        if add_module_to_firestore(name, url):
+            # Update in-memory dictionary
             module_database[name] = url
-            await interaction.response.send_message(f"module upload successful: **{name}** added.")
+            await interaction.response.send_message(f"module upload successful and persistent: **{name}** added.")
         else:
-             await interaction.response.send_message("Failed to add module due to a database error.", ephemeral=True)
+             await interaction.response.send_message("Failed to add module due to database error. Is Firestore configured?", ephemeral=True)
 
 
 # --- COMMAND: /list ---
-@client.tree.command(name="list", description="Show all modules")
+@client.tree.command(name="list", description="Show all modules from the persistent database")
 async def list_modules(interaction: discord.Interaction):
     if not module_database:
         await interaction.response.send_message("The database is empty.", ephemeral=True)
@@ -116,7 +130,6 @@ async def list_modules(interaction: discord.Interaction):
     content = "\n".join(module_list)
 
     if len(content) > 1950:
-        # For long lists, we still send a text file buffer
         await interaction.response.send_message(
             "List is too long! Sending as text file.",
             file=discord.File(fp=discord.io.BytesIO(content.encode("utf-8")), filename="modules_list.txt"))
@@ -133,21 +146,19 @@ async def delete(interaction: discord.Interaction, name: str, password: str):
         return
 
     if name in module_database:
-        # Delete from SQLite
-        query = "DELETE FROM modules WHERE name = ?"
-        if execute_db_change(query, (name,)):
-            # Delete from in-memory dictionary only on success
+        # Delete from Firestore
+        if delete_module_from_firestore(name):
+            # Delete from in-memory dictionary
             del module_database[name]
-            await interaction.response.send_message(f"✅ Successfully deleted: **{name}**")
+            await interaction.response.send_message(f"✅ Successfully deleted: **{name}** (Persistent)")
         else:
-             await interaction.response.send_message("Failed to delete module due to a database error.", ephemeral=True)
+             await interaction.response.send_message("Failed to delete module due to database error.", ephemeral=True)
     else:
         await interaction.response.send_message(f"⚠️ Module **{name}** not found.", ephemeral=True)
 
 
 # --- START BOT AND KEEP-ALIVE SERVER ---
 
-# Pass the module_database dictionary as the required positional argument.
 keep_alive(module_database)
 
 DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN')
