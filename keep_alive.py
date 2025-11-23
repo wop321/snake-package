@@ -1,16 +1,19 @@
 import os 
 from flask import Flask, redirect, abort, Response
-import asyncio # NEW: Import asyncio
+import asyncio 
 
 # Global variable to hold the reference to the Discord bot's live module database.
 global_module_database = {}
-# Removed: server_ready and import time/threading
 
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-# ... (home function unchanged) ...
+    """
+    The main route. It generates an HTML page listing all available shortcuts
+    from the in-memory database dictionary (synced from Firestore).
+    This serves as the public, viewable database.
+    """
     names = sorted(global_module_database.keys())
     
     if not names:
@@ -71,7 +74,10 @@ def home():
 
 @app.route('/<name>')
 def redirect_to_url(name):
-# ... (redirect_to_url function unchanged) ...
+    """
+    Looks up the 'name' (shortcut) in the database and redirects the user
+    to the associated Git install command URL.
+    """
     url = global_module_database.get(name)
     
     if url:
@@ -84,19 +90,21 @@ def run_flask_server():
     """Blocking function to start the Flask server."""
     # Use 0.0.0.0 and the PORT environment variable expected by hosting services
     print("Attempting to start Flask server on 0.0.0.0...")
-    app.run(host='0.0.0.0', port=os.environ.get('PORT', 8080), debug=False)
+    # By setting threaded=True, we rely on Flask's internal threading, 
+    # but still offload the main blocking call via the executor.
+    app.run(host='0.0.0.0', port=os.environ.get('PORT', 8080), debug=False, threaded=True)
 
 
-async def keep_alive(db_reference):
+async def keep_alive(client, db_reference):
     """
     Schedules the blocking Flask server function to run on a separate thread 
     provided by the Discord bot's event loop executor.
+    
+    This function is called by client.setup_hook and receives the client object 
+    (Arg 1) and the database reference (Arg 2).
     """
     global global_module_database
     global_module_database = db_reference
-    
-    # Get the global client instance from bot.py
-    from bot import client 
     
     # Run the blocking Flask server in the event loop's executor
     await client.loop.run_in_executor(None, run_flask_server)
