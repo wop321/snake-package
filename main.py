@@ -6,11 +6,6 @@ import aiohttp
 import json 
 import asyncio # NEW: Import asyncio
 
-# --- NEW: Optional Local Environment Loading ---
-try:
-# ... (dotenv block unchanged) ...
-# ---------------------------------------------
-
 # Core Firebase Admin SDK imports
 import firebase_admin
 from firebase_admin import credentials
