@@ -1,6 +1,6 @@
 import threading
-import os
 from flask import Flask, redirect, abort, Response
+import os # MOVED: Now imported globally at the top
 
 # Global variable to hold the reference to the Discord bot's live module database.
 # This dictionary is updated by the main bot file after loading from Firestore.
@@ -92,7 +92,7 @@ def redirect_to_url(name):
 
 def run():
     """Starts the Flask server."""
-    # Ensure debug is off for deployment
+    # os is now available globally
     app.run(host='0.0.0.0', port=os.environ.get('PORT', 8080), debug=False) 
 
 def keep_alive(db_reference):
@@ -102,9 +102,6 @@ def keep_alive(db_reference):
     """
     global global_module_database
     global_module_database = db_reference
-    
-    # We must import os here for os.environ.get('PORT')
-    import os
     
     t = threading.Thread(target=run)
     t.start()
