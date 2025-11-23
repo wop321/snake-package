@@ -133,6 +133,13 @@ class MyClient(discord.Client):
         super().__init__(intents=discord.Intents.default())
         self.tree = app_commands.CommandTree(self)
 
+    async def setup_hook(self) -> None:
+        """Called immediately after the client is initialised but before connecting to Discord."""
+        # Schedule the web server to run concurrently in the background.
+        # This is the correct way to start non-blocking background tasks in discord.py.
+        self.loop.create_task(keep_alive(self, module_database))
+        print("Keep-alive task scheduled via setup_hook.")
+
     async def on_ready(self):
         # Load data from the persistent source (Firestore)
         load_database()
@@ -222,7 +229,7 @@ async def delete(interaction: discord.Interaction, name: str, password: str):
         await interaction.response.send_message(f"⚠️ Project **{name}** not found.", ephemeral=True)
 
 
-# --- START BOT AND KEEP-ALIVE SERVER ---
+# --- START BOT ---
 
 DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN')
 
@@ -230,8 +237,5 @@ if DISCORD_TOKEN is None:
     print("FATAL ERROR: DISCORD_TOKEN environment variable not set.")
     exit()
 
-# The FIX: client is now defined above, so we can use it here.
-# Run the Discord bot and the Flask server concurrently using asyncio
-client.loop.create_task(keep_alive(module_database))
-
+# The web server startup is now handled inside MyClient.setup_hook()
 client.run(DISCORD_TOKEN)
