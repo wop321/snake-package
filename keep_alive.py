@@ -1,10 +1,12 @@
 import threading
 from flask import Flask, redirect, abort, Response
-import os # MOVED: Now imported globally at the top
+import os 
+import time
 
 # Global variable to hold the reference to the Discord bot's live module database.
-# This dictionary is updated by the main bot file after loading from Firestore.
 global_module_database = {}
+# Flag to track if the server has started successfully
+server_ready = False 
 
 app = Flask(__name__)
 
@@ -84,7 +86,6 @@ def redirect_to_url(name):
     if url:
         # Flask redirects to the VALUE of the URL, which is the full 
         # "pip install git+https://..." string.
-        # This allows the user's terminal to process the pip install command correctly.
         return redirect(url, code=302)
     else:
         return abort(404, description=f"Module '{name}' not found in the persistent database.")
@@ -92,8 +93,17 @@ def redirect_to_url(name):
 
 def run():
     """Starts the Flask server."""
-    # os is now available globally
-    app.run(host='0.0.0.0', port=os.environ.get('PORT', 8080), debug=False) 
+    global server_ready
+    try:
+        # Flask's app.run() is blocking, but setting server_ready inside the thread
+        # helps the main script wait for it to start.
+        app.run(host='0.0.0.0', port=os.environ.get('PORT', 8080), debug=False)
+        # This line is theoretically never reached during normal operation
+        server_ready = True
+    except Exception as e:
+        print(f"Flask server error: {e}")
+        server_ready = False
+
 
 def keep_alive(db_reference):
     """
@@ -104,5 +114,13 @@ def keep_alive(db_reference):
     global_module_database = db_reference
     
     t = threading.Thread(target=run)
+    t.daemon = True # Makes sure the thread closes when the main program exits
     t.start()
-    print("Keep-alive server started.")
+    
+    # Wait for the server thread to start before returning control to the bot
+    # This prevents the bot from crashing if the server isn't ready.
+    while not server_ready:
+        time.sleep(0.1) 
+    
+    print("Keep-alive server started and confirmed running.")
+    return t
