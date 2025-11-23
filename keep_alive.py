@@ -1,22 +1,16 @@
-import threading
-from flask import Flask, redirect, abort, Response
 import os 
-import time
+from flask import Flask, redirect, abort, Response
+import asyncio # NEW: Import asyncio
 
 # Global variable to hold the reference to the Discord bot's live module database.
 global_module_database = {}
-# Flag to track if the server has started successfully
-server_ready = False 
+# Removed: server_ready and import time/threading
 
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    """
-    The main route. It generates an HTML page listing all available shortcuts
-    from the in-memory database dictionary (synced from Firestore).
-    This serves as the public, viewable database.
-    """
+# ... (home function unchanged) ...
     names = sorted(global_module_database.keys())
     
     if not names:
@@ -77,50 +71,34 @@ def home():
 
 @app.route('/<name>')
 def redirect_to_url(name):
-    """
-    Looks up the 'name' (shortcut) in the database and redirects the user
-    to the associated Git install command URL.
-    """
+# ... (redirect_to_url function unchanged) ...
     url = global_module_database.get(name)
     
     if url:
-        # Flask redirects to the VALUE of the URL, which is the full 
-        # "pip install git+https://..." string.
         return redirect(url, code=302)
     else:
         return abort(404, description=f"Module '{name}' not found in the persistent database.")
 
 
-def run():
-    """Starts the Flask server."""
-    global server_ready
-    try:
-        # Flask's app.run() is blocking, but setting server_ready inside the thread
-        # helps the main script wait for it to start.
-        app.run(host='0.0.0.0', port=os.environ.get('PORT', 8080), debug=False)
-        # This line is theoretically never reached during normal operation
-        server_ready = True
-    except Exception as e:
-        print(f"Flask server error: {e}")
-        server_ready = False
+def run_flask_server():
+    """Blocking function to start the Flask server."""
+    # Use 0.0.0.0 and the PORT environment variable expected by hosting services
+    print("Attempting to start Flask server on 0.0.0.0...")
+    app.run(host='0.0.0.0', port=os.environ.get('PORT', 8080), debug=False)
 
 
-def keep_alive(db_reference):
+async def keep_alive(db_reference):
     """
-    Initializes and starts the Flask server in a separate thread,
-    and accepts the database dictionary reference.
+    Schedules the blocking Flask server function to run on a separate thread 
+    provided by the Discord bot's event loop executor.
     """
     global global_module_database
     global_module_database = db_reference
     
-    t = threading.Thread(target=run)
-    t.daemon = True # Makes sure the thread closes when the main program exits
-    t.start()
+    # Get the global client instance from bot.py
+    from bot import client 
     
-    # Wait for the server thread to start before returning control to the bot
-    # This prevents the bot from crashing if the server isn't ready.
-    while not server_ready:
-        time.sleep(0.1) 
+    # Run the blocking Flask server in the event loop's executor
+    await client.loop.run_in_executor(None, run_flask_server)
     
-    print("Keep-alive server started and confirmed running.")
-    return t
+    print("Keep-alive server confirmed running via asyncio executor.")
