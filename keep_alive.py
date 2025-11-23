@@ -1,4 +1,5 @@
 import threading
+import os
 from flask import Flask, redirect, abort, Response
 
 # Global variable to hold the reference to the Discord bot's live module database.
